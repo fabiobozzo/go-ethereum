@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2194,6 +2195,234 @@ func TestSimulateV1(t *testing.T) {
 			if !reflect.DeepEqual(have, tc.want) {
 				t.Log(string(resBytes))
 				t.Errorf("test %s, result mismatch, have\n%v\n, want\n%v\n", tc.name, have, tc.want)
+			}
+		})
+	}
+}
+
+func TestMultiCall(t *testing.T) {
+	t.Parallel()
+
+	// Initialize test accounts
+	var (
+		accounts = newAccounts(3)
+		deadAddr = common.HexToAddress("0xdead")
+		genesis  = &core.Genesis{
+			Config: params.MergedTestChainConfig,
+			Alloc: types.GenesisAlloc{
+				accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+				accounts[1].addr: {Balance: big.NewInt(2 * params.Ether)},
+				accounts[2].addr: {Balance: big.NewInt(3 * params.Ether)},
+			},
+		}
+		genBlocks = 10
+	)
+
+	// ERC20 full bytecode (creation and runtime parts)
+	runtimeCode := common.FromHex("6060604052600436106100af576000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff16806306fdde03146100b4578063095ea7b31461014257806318160ddd1461019c57806323b872dd146101c557806327e235e31461023e578063313ce5671461028b5780635c658165146102ba57806370a082311461032657806395d89b4114610373578063a9059cbb14610401578063dd62ed3e1461045b575b600080fd5b34156100bf57600080fd5b6100c76104c7565b6040518080602001828103825283818151815260200191508051906020019080838360005b838110156101075780820151818401526020810190506100ec565b50505050905090810190601f1680156101345780820380516001836020036101000a031916815260200191505b509250505060405180910390f35b341561014d57600080fd5b610182600480803573ffffffffffffffffffffffffffffffffffffffff16906020019091908035906020019091905050610565565b604051808215151515815260200191505060405180910390f35b34156101a757600080fd5b6101af610657565b6040518082815260200191505060405180910390f35b34156101d057600080fd5b610224600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803590602001909190505061065d565b604051808215151515815260200191505060405180910390f35b341561024957600080fd5b610275600480803573ffffffffffffffffffffffffffffffffffffffff169060200190919050506108f7565b6040518082815260200191505060405180910390f35b341561029657600080fd5b61029e61090f565b604051808260ff1660ff16815260200191505060405180910390f35b34156102c557600080fd5b610310600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803573ffffffffffffffffffffffffffffffffffffffff16906020019091905050610922565b6040518082815260200191505060405180910390f35b341561033157600080fd5b61035d600480803573ffffffffffffffffffffffffffffffffffffffff16906020019091905050610947565b6040518082815260200191505060405180910390f35b341561037e57600080fd5b610386610990565b6040518080602001828103825283818151815260200191508051906020019080838360005b838110156103c65780820151818401526020810190506103ab565b50505050905090810190601f1680156103f35780820380516001836020036101000a031916815260200191505b509250505060405180910390f35b341561040c57600080fd5b610441600480803573ffffffffffffffffffffffffffffffffffffffff16906020019091908035906020019091905050610a2e565b604051808215151515815260200191505060405180910390f35b341561046657600080fd5b6104b1600480803573ffffffffffffffffffffffffffffffffffffffff1690602001909190803573ffffffffffffffffffffffffffffffffffffffff16906020019091905050610b87565b6040518082815260200191505060405180910390f35b60038054600181600116156101000203166002900480601f01602080910402602001604051908101604052809291908181526020018280546001816001161561010002031660029004801561055d5780601f106105325761010080835404028352916020019161055d565b820191906000526020600020905b81548152906001019060200180831161054057829003601f168201915b505050505081565b600081600260003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060008573ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020819055508273ffffffffffffffffffffffffffffffffffffffff163373ffffffffffffffffffffffffffffffffffffffff167f8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925846040518082815260200191505060405180910390a36001905092915050565b60005481565b600080600260008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002054905082600160008773ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020541015801561072e5750828110155b151561073957600080fd5b82600160008673ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000206000828254019250508190555082600160008773ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825403925050819055507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8110156108865782600260008773ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825403925050819055505b8373ffffffffffffffffffffffffffffffffffffffff168573ffffffffffffffffffffffffffffffffffffffff167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef856040518082815260200191505060405180910390a360019150509392505050565b60016020528060005260406000206000915090505481565b600460009054906101000a900460ff1681565b6002602052816000526040600020602052806000526040600020600091509150505481565b6000600160008373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020549050919050565b60058054600181600116156101000203166002900480601f016020809104026020016040519081016040528092919081815260200182805460018160011615610100020316600290048015610a265780601f106109fb57610100808354040283529160200191610a26565b820191906000526020600020905b815481529060010190602001808311610a0957829003601f168201915b505050505081565b600081600160003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000205410151515610a7e57600080fd5b81600160003373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000206000828254039250508190555081600160008573ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020600082825401925050819055508273ffffffffffffffffffffffffffffffffffffffff163373ffffffffffffffffffffffffffffffffffffffff167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef846040518082815260200191505060405180910390a36001905092915050565b6000600260008473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff16815260200190815260200160002060008373ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff168152602001908152602001600020549050929150505600a165627a7a72305820df254047bc8f2904ad3e966b6db116d703bebd40efadadb5e738c836ffc8f58a0029")
+
+	// Initialize contract storage with balances
+	storage := make(map[common.Hash]common.Hash)
+
+	// Set total supply (slot 0)
+	storage[common.Hash{}] = common.BigToHash(big.NewInt(100))
+
+	// In ERC20, balances are stored at keccak256(address + 1)
+	balanceSlot := common.BigToHash(big.NewInt(1))
+	key0 := crypto.Keccak256Hash(
+		common.LeftPadBytes(accounts[0].addr.Bytes(), 32),
+		common.LeftPadBytes(balanceSlot.Bytes(), 32),
+	)
+	storage[key0] = common.BigToHash(big.NewInt(100))
+
+	key1 := crypto.Keccak256Hash(
+		common.LeftPadBytes(accounts[1].addr.Bytes(), 32),
+		common.LeftPadBytes(balanceSlot.Bytes(), 32),
+	)
+	storage[key1] = common.BigToHash(big.NewInt(200))
+
+	t.Logf("Balance slot for %x: %x", accounts[0].addr, key0)
+	t.Logf("Balance slot for %x: %x", accounts[1].addr, key1)
+
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	genesis.Alloc[contractAddr] = types.Account{
+		Balance: big.NewInt(0),
+		Code:    runtimeCode,
+		Storage: storage,
+	}
+
+	backend := newTestBackend(t, genBlocks, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
+		b.SetPoS()
+	})
+	api := NewBlockChainAPI(backend)
+
+	// Debug contract setup
+	t.Logf("Contract address: %x", contractAddr)
+	t.Logf("Contract code length: %d", len(runtimeCode))
+	t.Logf("Contract storage: %+v", storage)
+
+	// balanceOf function signature: 0x70a08231
+	balanceOfSig := []byte{0x70, 0xa0, 0x82, 0x31}
+
+	makeBalanceCall := func(addr common.Address) *hexutil.Bytes {
+		data := make([]byte, 36)
+		copy(data[0:4], balanceOfSig)
+		copy(data[4:], common.LeftPadBytes(addr.Bytes(), 32))
+		hb := hexutil.Bytes(data)
+		return &hb
+	}
+
+	// Expected results
+	expectedBalance100 := make([]byte, 32)
+	binary.BigEndian.PutUint64(expectedBalance100[24:], 100)
+	expectedBalance200 := make([]byte, 32)
+	binary.BigEndian.PutUint64(expectedBalance200[24:], 200)
+	zeroBalance := make([]byte, 32)
+	emptyBytes := hexutil.Bytes{}
+
+	var testSuite = []struct {
+		name    string
+		calls   []TransactionArgs
+		want    []*MultiCallResult
+		wantErr error
+	}{
+		{
+			name: "multiple calls to balanceOf",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[1].addr),
+				},
+			},
+			want: []*MultiCallResult{
+				{
+					Data: expectedBalance100,
+				},
+				{
+					Data: expectedBalance200,
+				},
+			},
+		},
+		{
+			name: "invalid contract address",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &deadAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+			},
+			want: []*MultiCallResult{
+				{
+					Data: make([]byte, 0),
+				},
+			},
+		},
+		{
+			name: "invalid function selector",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78},
+				},
+			},
+			want: []*MultiCallResult{
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+		{
+			name: "missing input data",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &emptyBytes,
+				},
+			},
+			want: []*MultiCallResult{
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+		{
+			name: "mixed valid and invalid calls",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &deadAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[2].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78}, // Invalid function selector
+				},
+			},
+			want: []*MultiCallResult{
+				{
+					Data: expectedBalance100,
+				},
+				{
+					Data: make([]byte, 0),
+				},
+				{
+					Data: zeroBalance,
+				},
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testSuite {
+		t.Run(tc.name, func(t *testing.T) {
+			// Add debug output for call data
+			for i, call := range tc.calls {
+				t.Logf("Call %d - Raw Data: %x", i, []byte(*call.Data))
+			}
+
+			results, err := api.MultiCall(context.Background(), tc.calls, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for i, result := range results {
+				want := tc.want[i]
+				if want.Error != "" {
+					if result.Error != want.Error {
+						t.Errorf("result[%d] error mismatch: got %v, want %v", i, result.Error, want.Error)
+					}
+					continue
+				}
+
+				// Debug the actual result
+				t.Logf("Result %d - Raw Data: %x", i, result.Data)
+
+				if !bytes.Equal(result.Data, want.Data) {
+					t.Errorf("result[%d] data mismatch:\ngot  %x\nwant %x",
+						i, result.Data, want.Data)
+				}
 			}
 		})
 	}
