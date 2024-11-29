@@ -2257,7 +2257,6 @@ func TestMultiCall(t *testing.T) {
 	})
 	api := NewBlockChainAPI(backend)
 
-	// Debug contract setup
 	t.Logf("Contract address: %x", contractAddr)
 	t.Logf("Contract code length: %d", len(common.FromHex(string(erc20Bytecode))))
 	t.Logf("Contract storage: %+v", storage)
@@ -2398,7 +2397,7 @@ func TestMultiCall(t *testing.T) {
 
 	for _, tc := range testSuite {
 		t.Run(tc.name, func(t *testing.T) {
-			// Add debug output for call data
+			// Debug output for call data
 			for i, call := range tc.calls {
 				t.Logf("Call %d - Raw Data: %x", i, []byte(*call.Data))
 			}
@@ -2462,9 +2461,7 @@ func BenchmarkCallVsMultiCall(b *testing.B) {
 		Storage: storage,
 	}
 
-	// balanceOf function signature: 0x70a08231
 	balanceOfSig := []byte{0x70, 0xa0, 0x82, 0x31}
-
 	makeBalanceCall := func(addr common.Address) *hexutil.Bytes {
 		data := make([]byte, 36)
 		copy(data[0:4], balanceOfSig)
@@ -2473,7 +2470,8 @@ func BenchmarkCallVsMultiCall(b *testing.B) {
 		return &hb
 	}
 
-	testCases := []int{1, 10, 50, 100} // Number of calls to test
+	// Number of calls to test
+	testCases := []int{1, 10, 50, 100}
 
 	for _, n := range testCases {
 		// Prepare n calls
@@ -2507,7 +2505,7 @@ func BenchmarkCallVsMultiCall(b *testing.B) {
 					From: &accounts[0].addr,
 					To:   &contractAddr,
 					Data: makeBalanceCall(accounts[i].addr),
-					Gas:  &gasLimit, // Set gas limit in tx args too
+					Gas:  &gasLimit,
 				}
 			}
 
