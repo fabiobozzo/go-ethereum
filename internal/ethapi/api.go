@@ -935,19 +935,20 @@ func (api *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockN
 	return result.Return(), result.Err
 }
 
-// MultiCallResult represents the result of a single call in a MultiCall operation
-type MultiCallResult struct {
+// MulticallResult represents the result of a single call in a Multicall operation
+type MulticallResult struct {
 	Data  hexutil.Bytes `json:"data,omitempty"`
 	Error string        `json:"error,omitempty"`
+	Code  int           `json:"code,omitempty"`
 }
 
-// MultiCall executes multiple message calls in parallel and returns their results.
+// Multicall executes multiple message calls in parallel and returns their results.
 // It is similar to eth_call but accepts an array of transactions and executes them concurrently.
 //
 // Each call execution is isolated with its own state copy, ensuring that parallel
 // execution does not affect other calls' results. It returns an array of call results in the same order as the input arguments.
 // If any call fails or reverts, the entire operation fails and returns the first error encountered.
-func (api *BlockChainAPI) MultiCall(ctx context.Context, args []TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash) ([]*MultiCallResult, error) {
+func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash) ([]*MulticallResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -957,7 +958,7 @@ func (api *BlockChainAPI) MultiCall(ctx context.Context, args []TransactionArgs,
 		bNrOrHash = *blockNrOrHash
 	}
 
-	results := make([]*MultiCallResult, len(args))
+	results := make([]*MulticallResult, len(args))
 
 	var wg sync.WaitGroup
 	var workersChan = make(chan int, len(args))
@@ -965,7 +966,7 @@ func (api *BlockChainAPI) MultiCall(ctx context.Context, args []TransactionArgs,
 	for i := 0; i < multiCallConcurrentWorkers; i++ {
 		go func() {
 			for index := range workersChan {
-				result := &MultiCallResult{}
+				result := &MulticallResult{}
 
 				output, err := DoCall(ctx, api.b, args[index], bNrOrHash, nil, nil, api.b.RPCEVMTimeout(), api.b.RPCGasCap())
 
@@ -976,7 +977,9 @@ func (api *BlockChainAPI) MultiCall(ctx context.Context, args []TransactionArgs,
 					if output.Err != nil {
 						result.Error = output.Err.Error()
 						if len(output.Revert()) > 0 {
-							result.Error = newRevertError(output.Revert()).Error()
+							re := newRevertError(output.Revert())
+							result.Error = re.Error()
+							result.Code = re.ErrorCode()
 						}
 					}
 				}

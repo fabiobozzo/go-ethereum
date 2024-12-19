@@ -36,6 +36,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/holiman/uint256"
+	"github.com/stretchr/testify/require"
+
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -58,8 +61,6 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/triedb"
-	"github.com/holiman/uint256"
-	"github.com/stretchr/testify/require"
 )
 
 //go:embed testdata/erc20.hex
@@ -2283,7 +2284,7 @@ func TestMultiCall(t *testing.T) {
 	var testSuite = []struct {
 		name    string
 		calls   []TransactionArgs
-		want    []*MultiCallResult
+		want    []*MulticallResult
 		wantErr error
 	}{
 		{
@@ -2300,7 +2301,7 @@ func TestMultiCall(t *testing.T) {
 					Data: makeBalanceCall(accounts[1].addr),
 				},
 			},
-			want: []*MultiCallResult{
+			want: []*MulticallResult{
 				{
 					Data: expectedBalance100,
 				},
@@ -2318,7 +2319,7 @@ func TestMultiCall(t *testing.T) {
 					Data: makeBalanceCall(accounts[0].addr),
 				},
 			},
-			want: []*MultiCallResult{
+			want: []*MulticallResult{
 				{
 					Data: make([]byte, 0),
 				},
@@ -2333,7 +2334,7 @@ func TestMultiCall(t *testing.T) {
 					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78},
 				},
 			},
-			want: []*MultiCallResult{
+			want: []*MulticallResult{
 				{
 					Error: "execution reverted",
 				},
@@ -2348,7 +2349,7 @@ func TestMultiCall(t *testing.T) {
 					Data: &emptyBytes,
 				},
 			},
-			want: []*MultiCallResult{
+			want: []*MulticallResult{
 				{
 					Error: "execution reverted",
 				},
@@ -2378,7 +2379,7 @@ func TestMultiCall(t *testing.T) {
 					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78}, // Invalid function selector
 				},
 			},
-			want: []*MultiCallResult{
+			want: []*MulticallResult{
 				{
 					Data: expectedBalance100,
 				},
@@ -2402,7 +2403,7 @@ func TestMultiCall(t *testing.T) {
 				t.Logf("Call %d - Raw Data: %x", i, []byte(*call.Data))
 			}
 
-			results, err := api.MultiCall(context.Background(), tc.calls, nil)
+			results, err := api.Multicall(context.Background(), tc.calls, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -2484,9 +2485,9 @@ func BenchmarkCallVsMultiCall(b *testing.B) {
 			}
 		}
 
-		b.Run(fmt.Sprintf("MultiCall-%d", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("Multicall-%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				_, err := api.MultiCall(context.Background(), calls, nil)
+				_, err := api.Multicall(context.Background(), calls, nil)
 				if err != nil {
 					b.Fatal(err)
 				}
