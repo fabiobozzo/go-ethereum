@@ -21,6 +21,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	_ "embed"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/holiman/uint256"
+	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
@@ -56,9 +61,10 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/triedb"
-	"github.com/holiman/uint256"
-	"github.com/stretchr/testify/require"
 )
+
+//go:embed testdata/erc20.hex
+var erc20Bytecode []byte
 
 func testTransactionMarshal(t *testing.T, tests []txData, config *params.ChainConfig) {
 	var (
@@ -413,7 +419,7 @@ func allBlobTxs(addr common.Address, config *params.ChainConfig) []txData {
 	}
 }
 
-func newTestAccountManager(t *testing.T) (*accounts.Manager, accounts.Account) {
+func newTestAccountManager(t testing.TB) (*accounts.Manager, accounts.Account) {
 	var (
 		dir        = t.TempDir()
 		am         = accounts.NewManager(nil)
@@ -439,7 +445,7 @@ type testBackend struct {
 	acc     accounts.Account
 }
 
-func newTestBackend(t *testing.T, n int, gspec *core.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
+func newTestBackend(t testing.TB, n int, gspec *core.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
 	var (
 		cacheConfig = &core.CacheConfig{
 			TrieCleanLimit:    256,
@@ -484,6 +490,7 @@ func (b testBackend) ExtRPCEnabled() bool                      { return false }
 func (b testBackend) RPCGasCap() uint64                        { return 10000000 }
 func (b testBackend) RPCEVMTimeout() time.Duration             { return time.Second }
 func (b testBackend) RPCTxFeeCap() float64                     { return 0 }
+func (b testBackend) MulticallWorkers() int                    { return 5 }
 func (b testBackend) UnprotectedAllowed() bool                 { return false }
 func (b testBackend) SetHead(number uint64)                    {}
 func (b testBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Header, error) {
@@ -2194,6 +2201,323 @@ func TestSimulateV1(t *testing.T) {
 			if !reflect.DeepEqual(have, tc.want) {
 				t.Log(string(resBytes))
 				t.Errorf("test %s, result mismatch, have\n%v\n, want\n%v\n", tc.name, have, tc.want)
+			}
+		})
+	}
+}
+
+func TestMultiCall(t *testing.T) {
+	t.Parallel()
+
+	// Initialize test accounts
+	var (
+		accounts = newAccounts(3)
+		deadAddr = common.HexToAddress("0xdead")
+		genesis  = &core.Genesis{
+			Config: params.MergedTestChainConfig,
+			Alloc: types.GenesisAlloc{
+				accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+				accounts[1].addr: {Balance: big.NewInt(2 * params.Ether)},
+				accounts[2].addr: {Balance: big.NewInt(3 * params.Ether)},
+			},
+		}
+		genBlocks = 10
+	)
+
+	// Initialize contract storage with balances
+	storage := make(map[common.Hash]common.Hash)
+
+	// Set total supply (slot 0)
+	storage[common.Hash{}] = common.BigToHash(big.NewInt(100))
+
+	// In ERC20, balances are stored at keccak256(address + 1)
+	balanceSlot := common.BigToHash(big.NewInt(1))
+	key0 := crypto.Keccak256Hash(
+		common.LeftPadBytes(accounts[0].addr.Bytes(), 32),
+		common.LeftPadBytes(balanceSlot.Bytes(), 32),
+	)
+	storage[key0] = common.BigToHash(big.NewInt(100))
+
+	key1 := crypto.Keccak256Hash(
+		common.LeftPadBytes(accounts[1].addr.Bytes(), 32),
+		common.LeftPadBytes(balanceSlot.Bytes(), 32),
+	)
+	storage[key1] = common.BigToHash(big.NewInt(200))
+
+	t.Logf("Balance slot for %x: %x", accounts[0].addr, key0)
+	t.Logf("Balance slot for %x: %x", accounts[1].addr, key1)
+
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	genesis.Alloc[contractAddr] = types.Account{
+		Balance: big.NewInt(0),
+		Code:    common.FromHex(string(erc20Bytecode)),
+		Storage: storage,
+	}
+
+	backend := newTestBackend(t, genBlocks, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
+		b.SetPoS()
+	})
+	api := NewBlockChainAPI(backend)
+
+	t.Logf("Contract address: %x", contractAddr)
+	t.Logf("Contract code length: %d", len(common.FromHex(string(erc20Bytecode))))
+	t.Logf("Contract storage: %+v", storage)
+
+	// balanceOf function signature: 0x70a08231
+	balanceOfSig := []byte{0x70, 0xa0, 0x82, 0x31}
+
+	makeBalanceCall := func(addr common.Address) *hexutil.Bytes {
+		data := make([]byte, 36)
+		copy(data[0:4], balanceOfSig)
+		copy(data[4:], common.LeftPadBytes(addr.Bytes(), 32))
+		hb := hexutil.Bytes(data)
+		return &hb
+	}
+
+	// Expected results
+	expectedBalance100 := make([]byte, 32)
+	binary.BigEndian.PutUint64(expectedBalance100[24:], 100)
+	expectedBalance200 := make([]byte, 32)
+	binary.BigEndian.PutUint64(expectedBalance200[24:], 200)
+	zeroBalance := make([]byte, 32)
+	emptyBytes := hexutil.Bytes{}
+
+	var testSuite = []struct {
+		name    string
+		calls   []TransactionArgs
+		want    []*MulticallResult
+		wantErr error
+	}{
+		{
+			name: "multiple calls to balanceOf",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[1].addr),
+				},
+			},
+			want: []*MulticallResult{
+				{
+					Data: expectedBalance100,
+				},
+				{
+					Data: expectedBalance200,
+				},
+			},
+		},
+		{
+			name: "invalid contract address",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &deadAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+			},
+			want: []*MulticallResult{
+				{
+					Data: make([]byte, 0),
+				},
+			},
+		},
+		{
+			name: "invalid function selector",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78},
+				},
+			},
+			want: []*MulticallResult{
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+		{
+			name: "missing input data",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &emptyBytes,
+				},
+			},
+			want: []*MulticallResult{
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+		{
+			name: "mixed valid and invalid calls",
+			calls: []TransactionArgs{
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &deadAddr,
+					Data: makeBalanceCall(accounts[0].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[2].addr),
+				},
+				{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: &hexutil.Bytes{0x12, 0x34, 0x56, 0x78}, // Invalid function selector
+				},
+			},
+			want: []*MulticallResult{
+				{
+					Data: expectedBalance100,
+				},
+				{
+					Data: make([]byte, 0),
+				},
+				{
+					Data: zeroBalance,
+				},
+				{
+					Error: "execution reverted",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testSuite {
+		t.Run(tc.name, func(t *testing.T) {
+			// Debug output for call data
+			for i, call := range tc.calls {
+				t.Logf("Call %d - Raw Data: %x", i, []byte(*call.Data))
+			}
+
+			results, err := api.Multicall(context.Background(), tc.calls, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for i, result := range results {
+				want := tc.want[i]
+				if want.Error != "" {
+					if result.Error != want.Error {
+						t.Errorf("result[%d] error mismatch: got %v, want %v", i, result.Error, want.Error)
+					}
+					continue
+				}
+
+				// Debug the actual result
+				t.Logf("Result %d - Raw Data: %x", i, result.Data)
+
+				if !bytes.Equal(result.Data, want.Data) {
+					t.Errorf("result[%d] data mismatch:\ngot  %x\nwant %x",
+						i, result.Data, want.Data)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkCallVsMultiCall(b *testing.B) {
+	accounts := newAccounts(100)
+	genesis := &core.Genesis{
+		Config: params.TestChainConfig,
+		Alloc: types.GenesisAlloc{
+			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+		},
+	}
+
+	backend := newTestBackend(b, 1, genesis, beacon.New(ethash.NewFaker()), nil)
+	api := NewBlockChainAPI(backend)
+
+	// Initialize contract storage with balances
+	storage := make(map[common.Hash]common.Hash)
+	storage[common.Hash{}] = common.BigToHash(big.NewInt(10000)) // total supply
+
+	// Set balances for all accounts
+	balanceSlot := common.BigToHash(big.NewInt(1))
+	for i, acc := range accounts {
+		key := crypto.Keccak256Hash(
+			common.LeftPadBytes(acc.addr.Bytes(), 32),
+			common.LeftPadBytes(balanceSlot.Bytes(), 32),
+		)
+		storage[key] = common.BigToHash(big.NewInt(int64(100 * (i + 1))))
+	}
+
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	genesis.Alloc[contractAddr] = types.Account{
+		Balance: big.NewInt(0),
+		Code:    erc20Bytecode,
+		Storage: storage,
+	}
+
+	balanceOfSig := []byte{0x70, 0xa0, 0x82, 0x31}
+	makeBalanceCall := func(addr common.Address) *hexutil.Bytes {
+		data := make([]byte, 36)
+		copy(data[0:4], balanceOfSig)
+		copy(data[4:], common.LeftPadBytes(addr.Bytes(), 32))
+		hb := hexutil.Bytes(data)
+		return &hb
+	}
+
+	// Number of calls to test
+	testCases := []int{1, 10, 50, 100}
+
+	for _, n := range testCases {
+		// Prepare n calls
+		calls := make([]TransactionArgs, n)
+		for i := 0; i < n; i++ {
+			calls[i] = TransactionArgs{
+				From: &accounts[0].addr,
+				To:   &contractAddr,
+				Data: makeBalanceCall(accounts[i].addr),
+			}
+		}
+
+		b.Run(fmt.Sprintf("Multicall-%d", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_, err := api.Multicall(context.Background(), calls, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+
+		b.Run(fmt.Sprintf("SerialCalls-%d", n), func(b *testing.B) {
+			latest := rpc.LatestBlockNumber
+			blockNrOrHash := rpc.BlockNumberOrHash{BlockNumber: &latest}
+			gasLimit := hexutil.Uint64(100000000)
+			overrides := &BlockOverrides{GasLimit: &gasLimit}
+
+			calls := make([]TransactionArgs, n)
+			for i := 0; i < n; i++ {
+				calls[i] = TransactionArgs{
+					From: &accounts[0].addr,
+					To:   &contractAddr,
+					Data: makeBalanceCall(accounts[i].addr),
+					Gas:  &gasLimit,
+				}
+			}
+
+			for i := 0; i < b.N; i++ {
+				for _, call := range calls {
+					_, err := api.Call(context.Background(), call, &blockNrOrHash, nil, overrides)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
 			}
 		})
 	}

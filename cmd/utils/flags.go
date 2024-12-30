@@ -35,6 +35,10 @@ import (
 	"strings"
 	"time"
 
+	pcsclite "github.com/gballet/go-libpcsclite"
+	gopsutil "github.com/shirou/gopsutil/mem"
+	"github.com/urfave/cli/v2"
+
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	bparams "github.com/ethereum/go-ethereum/beacon/params"
@@ -76,9 +80,6 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
-	pcsclite "github.com/gballet/go-libpcsclite"
-	gopsutil "github.com/shirou/gopsutil/mem"
-	"github.com/urfave/cli/v2"
 )
 
 // These are all the command line flags we support.
@@ -545,6 +546,12 @@ var (
 		Name:     "rpc.txfeecap",
 		Usage:    "Sets a cap on transaction fee (in ether) that can be sent via the RPC APIs (0 = no cap)",
 		Value:    ethconfig.Defaults.RPCTxFeeCap,
+		Category: flags.APICategory,
+	}
+	RPCMulticallWorkersFlag = &cli.IntFlag{
+		Name:     "rpc.multicall.workers",
+		Usage:    "Number of concurrent workers for Multicall API",
+		Value:    5,
 		Category: flags.APICategory,
 	}
 	// Authenticated RPC HTTP settings
@@ -1708,6 +1715,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(RPCGlobalTxFeeCapFlag.Name) {
 		cfg.RPCTxFeeCap = ctx.Float64(RPCGlobalTxFeeCapFlag.Name)
+	}
+	if ctx.IsSet(RPCMulticallWorkersFlag.Name) {
+		cfg.RPCMulticallWorkers = ctx.Int(RPCMulticallWorkersFlag.Name)
 	}
 	if ctx.IsSet(NoDiscoverFlag.Name) {
 		cfg.EthDiscoveryURLs, cfg.SnapDiscoveryURLs = []string{}, []string{}

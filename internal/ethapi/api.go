@@ -25,9 +25,12 @@ import (
 	gomath "math"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/holiman/uint256"
+
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -48,12 +51,13 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/holiman/uint256"
 )
 
-// estimateGasErrorRatio is the amount of overestimation eth_estimateGas is
-// allowed to produce in order to speed up calculations.
-const estimateGasErrorRatio = 0.015
+const (
+	// estimateGasErrorRatio is the amount of overestimation eth_estimateGas is
+	// allowed to produce in order to speed up calculations.
+	estimateGasErrorRatio = 0.015
+)
 
 var errBlobTxNotSupported = errors.New("signing blob transactions not supported")
 
@@ -928,6 +932,76 @@ func (api *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockN
 		return nil, newRevertError(result.Revert())
 	}
 	return result.Return(), result.Err
+}
+
+// MulticallResult represents the result of a single call in a Multicall operation
+type MulticallResult struct {
+	Data  hexutil.Bytes `json:"data,omitempty"`
+	Error string        `json:"error,omitempty"`
+	Code  int           `json:"code,omitempty"`
+}
+
+// Multicall executes multiple message calls in parallel and returns their results.
+// It is similar to eth_call but accepts an array of transactions and executes them concurrently.
+//
+// Each call execution is isolated with its own state copy, ensuring that parallel
+// execution does not affect other calls' results. It returns an array of call results in the same order as the input arguments.
+// If any call fails or reverts, the entire operation fails and returns the first error encountered.
+func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash) ([]*MulticallResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Use latest block if none specified
+	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	if blockNrOrHash != nil {
+		bNrOrHash = *blockNrOrHash
+	}
+
+	results := make([]*MulticallResult, len(args))
+
+	var wg sync.WaitGroup
+	var workersChan = make(chan int, len(args))
+
+	for i := 0; i < api.b.MulticallWorkers(); i++ {
+		go func() {
+			for index := range workersChan {
+				result := &MulticallResult{}
+
+				output, err := DoCall(ctx, api.b, args[index], bNrOrHash, nil, nil, api.b.RPCEVMTimeout(), api.b.RPCGasCap())
+
+				if err != nil {
+					result.Error = err.Error()
+				} else {
+					result.Data = output.Return()
+					if output.Err != nil {
+						result.Error = output.Err.Error()
+						if len(output.Revert()) > 0 {
+							re := newRevertError(output.Revert())
+							result.Error = re.Error()
+							result.Code = re.ErrorCode()
+						}
+					}
+				}
+
+				results[index] = result
+				wg.Done()
+			}
+		}()
+	}
+
+	wg.Add(len(args))
+	for i := range args {
+		select {
+		case workersChan <- i:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	wg.Wait()
+	close(workersChan)
+
+	return results, nil
 }
 
 // SimulateV1 executes series of transactions on top of a base state.
