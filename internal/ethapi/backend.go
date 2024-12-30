@@ -52,6 +52,7 @@ type Backend interface {
 	RPCGasCap() uint64            // global gas cap for eth_call over rpc: DoS protection
 	RPCEVMTimeout() time.Duration // global timeout for eth_call over rpc: DoS protection
 	RPCTxFeeCap() float64         // global tx fee cap for all transaction related APIs
+	MulticallWorkers() int        // number of concurrent workers processing multi calls
 	UnprotectedAllowed() bool     // allows only for EIP155 transactions.
 
 	// Blockchain API

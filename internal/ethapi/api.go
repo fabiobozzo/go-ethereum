@@ -56,8 +56,7 @@ import (
 const (
 	// estimateGasErrorRatio is the amount of overestimation eth_estimateGas is
 	// allowed to produce in order to speed up calculations.
-	estimateGasErrorRatio      = 0.015
-	multiCallConcurrentWorkers = 5
+	estimateGasErrorRatio = 0.015
 )
 
 var errBlobTxNotSupported = errors.New("signing blob transactions not supported")
@@ -963,7 +962,7 @@ func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs,
 	var wg sync.WaitGroup
 	var workersChan = make(chan int, len(args))
 
-	for i := 0; i < multiCallConcurrentWorkers; i++ {
+	for i := 0; i < api.b.MulticallWorkers(); i++ {
 		go func() {
 			for index := range workersChan {
 				result := &MulticallResult{}
