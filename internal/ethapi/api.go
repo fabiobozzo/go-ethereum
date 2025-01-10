@@ -970,7 +970,6 @@ func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs,
 	}
 
 	results := make([]*MulticallResult, len(args))
-	var stateMutex sync.RWMutex
 	var wg sync.WaitGroup
 	var workersChan = make(chan int, len(args))
 
@@ -979,11 +978,8 @@ func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs,
 			for index := range workersChan {
 				result := &MulticallResult{}
 
-				// Lock state for reading during the call
-				stateMutex.RLock()
 				// Call doCall directly with shared state and header
 				output, err := doCall(ctx, api.b, args[index], state, header, nil, nil, api.b.RPCEVMTimeout(), api.b.RPCGasCap())
-				stateMutex.RUnlock()
 
 				if err != nil {
 					result.Error = err.Error()
