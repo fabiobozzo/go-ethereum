@@ -957,17 +957,33 @@ func (api *BlockChainAPI) Multicall(ctx context.Context, args []TransactionArgs,
 		bNrOrHash = *blockNrOrHash
 	}
 
-	results := make([]*MulticallResult, len(args))
+	// Get shared state once
+	state, header, err := api.b.StateAndHeaderByNumberOrHash(ctx, bNrOrHash)
+	if state == nil || err != nil {
+		return nil, err
+	}
 
+	// Determine optimal worker count
+	workerCount := api.b.MulticallWorkers()
+	if workerCount > len(args) {
+		workerCount = len(args)
+	}
+
+	results := make([]*MulticallResult, len(args))
+	var stateMutex sync.RWMutex
 	var wg sync.WaitGroup
 	var workersChan = make(chan int, len(args))
 
-	for i := 0; i < api.b.MulticallWorkers(); i++ {
+	for i := 0; i < workerCount; i++ {
 		go func() {
 			for index := range workersChan {
 				result := &MulticallResult{}
 
-				output, err := DoCall(ctx, api.b, args[index], bNrOrHash, nil, nil, api.b.RPCEVMTimeout(), api.b.RPCGasCap())
+				// Lock state for reading during the call
+				stateMutex.RLock()
+				// Call doCall directly with shared state and header
+				output, err := doCall(ctx, api.b, args[index], state, header, nil, nil, api.b.RPCEVMTimeout(), api.b.RPCGasCap())
+				stateMutex.RUnlock()
 
 				if err != nil {
 					result.Error = err.Error()
